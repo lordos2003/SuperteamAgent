@@ -1,0 +1,31 @@
+# Секреты — НИКОГДА не коммитить
+.env
+.env.*
+!.env.example
+
+# Виртуальное окружение
+.venv/
+venv/
+env/
+
+# Python-кэш и артефакты сборки
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Инструменты разработки / IDE
+.vscode/
+.idea/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Локальные артефакты запуска
+*.log
+output/
+data/
+# Отчёты пересоздаются при каждом запуске
+verified_listings.json
+superteam_results.json
