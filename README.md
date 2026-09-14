@@ -31,8 +31,14 @@
 * детерминированный скоринг `score_listing()`: `score`, `score_breakdown`,
   `estimated_fit`, `skills`, `hours_until_deadline`, `submissions`,
   `eligibility_status` (без внешнего AI);
+* финальная eligibility-фильтрация TOP — `is_agent_compatible(entry)`:
+  одновременно `verification_status=VERIFIED_OPEN`, `final_decision=CANDIDATE`,
+  `eligibility_status=ELIGIBLE`, `agent_access` ∈ {`AGENT_ONLY`, `AGENT_ALLOWED`},
+  все флаги `requires_* = false` и `financial_risk != HIGH`;
 * разделы вывода `=== TOP OPPORTUNITIES ===`, `=== TOP AGENT-COMPATIBLE ===`,
-  `=== TOP HUMAN-ONLY ===`;
+  `=== TOP HUMAN-ONLY ===`, `=== EXCLUDED: REGION ===`,
+  `=== EXCLUDED: FINANCIAL RISK ===`, `=== EXCLUDED: HUMAN ONLY ===`,
+  `=== MANUAL ELIGIBILITY CHECK ===`;
 * итоговый отчёт `superteam_results.json` (+ `verified_listings.json`);
 * авторизация через заголовок `Authorization: Bearer <SUPERTEAM_API_KEY>`;
 * понятная обработка HTTP-кодов 400 / 401 / 403 / 404 / 429 / 500+;
@@ -217,7 +223,7 @@ Card: https://superteam.fun/earn/listing/steve-agent-arena-launch-your-agent-and
 
 ...
 
-=== TOP AGENT-COMPATIBLE ===
+=== EXCLUDED: REGION ===
 
 1
 
@@ -227,8 +233,8 @@ Card: https://superteam.fun/earn/listing/steve-agent-arena-launch-your-agent-and
     Reward: 10 000 USDC | Deadline: 2026-10-13 06:59 UTC (688.4h)
     Agent access: AGENT_ALLOWED | Region: Vietnam (REGION_RESTRICTED)
     Difficulty: MEDIUM | Financial risk: LOW | Own money: no
-    Decision: CANDIDATE
-    Exclusion reason: -
+    Decision: EXCLUDE
+    Exclusion reason: REGION_INELIGIBLE
     Card: https://superteam.fun/earn/listing/colosseum-crypto-worlds-fair-hackathon-superteam-vietnam-track
 
 === TOP HUMAN-ONLY ===
@@ -245,7 +251,7 @@ Card: https://superteam.fun/earn/listing/steve-agent-arena-launch-your-agent-and
 
 ...
 
-=== EXCLUDED FOR FINANCIAL RISK ===
+=== EXCLUDED: FINANCIAL RISK ===
 
 6
 
@@ -346,14 +352,10 @@ Card: https://superteam.fun/earn/listing/steve-agent-arena-launch-your-agent-and
 
 ### Приоритеты и сложность
 
-Балл складывается из: крипто-выплаты (`USDC`/`USDT` +30, `SOL` +25, другие стейблы +15…22,
-неизвестный токен +10), agent-compatibility (`AGENT_ONLY` +20, `AGENT_ALLOWED` +12,
-`HUMAN_ONLY` −25), стека (Python +12, Playwright +12, scraping +12, automation +10,
-API +8, testing +8, JavaScript +8, HTML/CSS +6; суммарно не более +30),
-beginner-friendly (+10) и штрафов (Rust/Solana protocol −15, узкая blockchain-специализация −15,
-design −12, content −10, marketing −10, финансовый риск MEDIUM −10).
+Итоговый балл считается детерминированно по формуле из раздела «Веса скоринга»
+ниже (`score_listing()`); здесь только пороги меток.
 
-`priority`: `HIGH` при балле ≥ 60, `MEDIUM` ≥ 35, иначе `LOW`.
+`priority`: `HIGH` при балле ≥ 60, `MEDIUM` ≥ 35, иначе `LOW` (значение совпадает со `score`).
 `difficulty`: `HARD` при Rust/on-chain/криптографии или требовании своих денег,
 `EASY` при beginner-маркерах (или небольшом стековом задании), иначе `MEDIUM`.
 
@@ -592,13 +594,22 @@ local blockchain/net/local validator, free API sandbox.
 * `=== TOP OPPORTUNITIES ===` — до 3 заданий с **положительным** score (в формате
   Reward / Deadline / Agent access / Region / Difficulty / Financial risk /
   Own money / Estimated fit / Score / Why / Card);
-* `=== TOP AGENT-COMPATIBLE ===` — только `AGENT_ONLY` / `AGENT_ALLOWED` (до 5);
-  задания с `decision = EXCLUDE` сюда **не попадают никогда**, даже если
-  `own money required = false`;
+* `=== TOP AGENT-COMPATIBLE ===` — только записи, проходящие финальную проверку
+  `is_agent_compatible(entry)` (до 5): `verification_status = VERIFIED_OPEN`,
+  `final_decision = CANDIDATE`, `eligibility_status = ELIGIBLE`,
+  `agent_access` ∈ {`AGENT_ONLY`, `AGENT_ALLOWED`}, все флаги `requires_*` равны
+  `false` и `financial_risk != HIGH`; задания с `decision = EXCLUDE` сюда
+  **не попадают никогда**, даже если `own money required = false`;
 * `=== TOP HUMAN-ONLY ===` — только `HUMAN_ONLY` (до 5), чтобы такие задачи не
   смешивались с основной выдачей;
-* `=== EXCLUDED FOR FINANCIAL RISK ===` — задания с
+* `=== EXCLUDED: REGION ===` — кандидаты с `eligibility_status = REGION_RESTRICTED`
+  (им проставляются `decision = EXCLUDE`, `exclusion_reason = REGION_INELIGIBLE`);
+* `=== EXCLUDED: FINANCIAL RISK ===` — задания с
   `exclusion_reason = REAL_FINANCIAL_ACTIVITY_REQUIRED` (флаги + цитаты из карточки);
+* `=== EXCLUDED: HUMAN ONLY ===` — тот же список `HUMAN_ONLY`, что и в
+  `=== TOP HUMAN-ONLY ===` (печатается отдельно, как исключённый из агентской выдачи);
+* `=== MANUAL ELIGIBILITY CHECK ===` — кандидаты с `eligibility_status = UNKNOWN`
+  (печатается только если такие есть);
 * `=== VERIFIED OPEN ===` — полный список всех прошедших фильтр.
 
 В каждом элементе печатаются строки `Decision:` и `Exclusion reason:`.
@@ -642,6 +653,10 @@ score = reward_score + agent_score + tech_score + difficulty_score
   ```
 
   При несовпадении задание получает `HARD EXCLUDE`, при совпадении — `ELIGIBLE`.
+
+* в TOP-разделах записи с `REGION_RESTRICTED` попадают в `=== EXCLUDED: REGION ===`
+  (`decision = EXCLUDE`, `exclusion_reason = REGION_INELIGIBLE`), а кандидаты с
+  неопределённым регионом (`UNKNOWN`) — в `=== MANUAL ELIGIBILITY CHECK ===`.
 
 ---
 
@@ -798,8 +813,15 @@ python -m pytest -q
 * deterministic rule-based `score_listing()` (reward / agent / tech / difficulty /
   competition / time / risk / region / nontech / protocol) + `score_breakdown` и `why`;
 * `estimated_fit`, `skills`, `hours_until_deadline`, `submissions`, `eligibility_status`;
+* финальная eligibility-фильтрация TOP (`is_agent_compatible()`): в
+  `=== TOP AGENT-COMPATIBLE ===` попадают только `VERIFIED_OPEN` + `CANDIDATE` +
+  `ELIGIBLE` + `AGENT_ONLY`/`AGENT_ALLOWED` + без флагов `requires_*` + без
+  `financial_risk = HIGH`; `REGION_RESTRICTED` → `=== EXCLUDED: REGION ===`
+  (`exclusion_reason = REGION_INELIGIBLE`), `UNKNOWN` → `=== MANUAL ELIGIBILITY CHECK ===`;
 * разделы `=== TOP OPPORTUNITIES ===` (до 3), `=== TOP AGENT-COMPATIBLE ===`,
-  `=== TOP HUMAN-ONLY ===` и полный `=== VERIFIED OPEN ===`;
+  `=== TOP HUMAN-ONLY ===`, `=== EXCLUDED: REGION ===`,
+  `=== EXCLUDED: FINANCIAL RISK ===`, `=== EXCLUDED: HUMAN ONLY ===`,
+  `=== MANUAL ELIGIBILITY CHECK ===` и полный `=== VERIFIED OPEN ===`;
 * в `superteam_results.json` добавлены `top_agent_compatible` и `top_human_only`.
 
 Этап 5 (план, по желанию) — не реализовано:

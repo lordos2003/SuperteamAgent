@@ -128,6 +128,41 @@ def build_final_entry(merged: Mapping[str, Any], card: Mapping[str, Any]) -> dic
     return entry
 
 
+def is_agent_compatible(entry: Mapping[str, Any]) -> bool:
+    """Проверить, проходит ли запись финальную eligibility-фильтрацию TOP.
+
+    Для попадания в ``top_agent_compatible`` одновременно обязательны:
+
+    * ``verification_status == VERIFIED_OPEN``;
+    * ``final_decision == CANDIDATE``;
+    * ``agent_access`` в ``{AGENT_ONLY, AGENT_ALLOWED}``;
+    * ``eligibility_status == ELIGIBLE``;
+    * все флаги ``requires_*`` равны ``false``;
+    * ``financial_risk != HIGH``.
+    """
+    if str(entry.get("verification_status") or "") != VERIFIED_OPEN:
+        return False
+    if entry.get("final_decision") != "CANDIDATE":
+        return False
+    if entry.get("agent_access") not in {"AGENT_ONLY", "AGENT_ALLOWED"}:
+        return False
+    if entry.get("eligibility_status") != "ELIGIBLE":
+        return False
+    financial_flags = (
+        "requires_own_money",
+        "requires_real_mainnet_activity",
+        "requires_real_trade",
+        "requires_deposit",
+        "requires_token_purchase",
+        "requires_user_gas",
+    )
+    if any(entry.get(flag) for flag in financial_flags):
+        return False
+    if entry.get("financial_risk") == "HIGH":
+        return False
+    return True
+
+
 def _token_from_reward(text: str) -> str:
     from .scoring import token_from_reward
 
@@ -235,12 +270,28 @@ async def run_hybrid_search(args: argparse.Namespace) -> int:
 
         ranked = sorted(entries, key=lambda entry: int(entry.get("score") or 0), reverse=True)
         candidates = [entry for entry in ranked if entry["final_decision"] == "CANDIDATE"]
-        agent_compatible = [
-            entry
-            for entry in candidates
-            if entry.get("agent_access") in {"AGENT_ONLY", "AGENT_ALLOWED"}
-        ]
-        human_only = [entry for entry in candidates if entry.get("agent_access") == "HUMAN_ONLY"]
+
+        # --- 4-7. Финальная eligibility-фильтрация для TOP ---
+        agent_compatible: list[dict[str, Any]] = []
+        human_only: list[dict[str, Any]] = []
+        region_excluded: list[dict[str, Any]] = []
+        manual_check: list[dict[str, Any]] = []
+        for entry in candidates:
+            if entry.get("agent_access") == "HUMAN_ONLY":
+                human_only.append(entry)
+                continue
+            if entry.get("eligibility_status") == "REGION_RESTRICTED":
+                entry["decision"] = "EXCLUDE"
+                entry["final_decision"] = "EXCLUDE"
+                entry["exclusion_reason"] = "REGION_INELIGIBLE"
+                region_excluded.append(entry)
+                continue
+            if entry.get("eligibility_status") == "UNKNOWN":
+                manual_check.append(entry)
+                continue
+            if is_agent_compatible(entry):
+                agent_compatible.append(entry)
+
         financial_excluded = [
             entry
             for entry in ranked
@@ -248,12 +299,16 @@ async def run_hybrid_search(args: argparse.Namespace) -> int:
             and entry.get("verification_status") == VERIFIED_OPEN
         ]
 
-        # --- 7. Итоги и файлы ---
+        # --- 8. Итоги и файлы ---
         print_verified_open(candidates)
         print_top_opportunities(candidates, limit=3)
         print_ranked_list("=== TOP AGENT-COMPATIBLE ===", agent_compatible, limit=5)
         print_ranked_list("=== TOP HUMAN-ONLY ===", human_only, limit=5)
+        print_ranked_list("=== EXCLUDED: REGION ===", region_excluded, limit=5)
         print_excluded_for_financial_risk(financial_excluded)
+        print_ranked_list("=== EXCLUDED: HUMAN ONLY ===", human_only, limit=5)
+        if manual_check:
+            print_ranked_list("=== MANUAL ELIGIBILITY CHECK ===", manual_check, limit=5)
 
         if args.no_verify:
             shown = len(merged) if args.show <= 0 else min(max(args.show, 0), len(merged))
@@ -300,11 +355,7 @@ async def run_hybrid_search(args: argparse.Namespace) -> int:
         )
         excluded = sum(1 for entry in entries if entry["final_decision"] == "EXCLUDE")
         financial_blocks = sum(1 for entry in entries if entry.get("requires_own_money"))
-        agent_ready = sum(
-            1
-            for entry in candidates
-            if str(entry.get("agent_access") or "").upper() in {"AGENT_ONLY", "AGENT_ALLOWED"}
-        )
+        agent_ready = len(agent_compatible)
         print(f"Статусы карточек: {status_counts}")
         print(
             f"Итого: уникальных {len(merged)}, подтверждено открытых {len(candidates)} "

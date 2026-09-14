@@ -263,7 +263,7 @@ def print_excluded_for_financial_risk(entries: Sequence[Mapping[str, Any]]) -> N
     Показываются все записи с ``exclusion_reason == REAL_FINANCIAL_ACTIVITY_REQUIRED``,
     включая те, где ``requires_own_money = false`` (например sponsored free lane).
     """
-    print("=== EXCLUDED FOR FINANCIAL RISK ===")
+    print("=== EXCLUDED: FINANCIAL RISK ===")
     print()
     print(len(entries))
     print()
