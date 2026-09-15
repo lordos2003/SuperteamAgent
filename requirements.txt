@@ -1,3 +1,4 @@
-# Зависимости SuperteamAgent (этап 1: authenticated connection + live listings)
+# Зависимости SuperteamAgent (httpx/python-dotenv — поиск, openpyxl — Excel-отчёт)
 httpx>=0.27,<1.0
 python-dotenv>=1.0,<2.0
+openpyxl>=3.1,<4.0

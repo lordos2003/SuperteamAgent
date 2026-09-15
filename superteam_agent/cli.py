@@ -1,7 +1,10 @@
 """Командный интерфейс: разбор аргументов и точка входа.
 
-Запуск: ``python -m superteam_agent [флаги]``. Все флаги совпадают с
-предыдущей командой ``python superteam_agent.py`` плюс ``--no-diagnostics``.
+Запуск: ``python superteam_agent.py`` (лончер) или ``python -m superteam_agent``.
+Обычный запуск печатает человекочитаемый отчёт (Available / Excluded / Unknown /
+Summary) и сохраняет его в ``superteam_report.md``; ``--json`` выводит
+технический JSON, ``--report`` повторяет отчёт по последнему прогону без сети,
+``--debug`` добавляет технические детали (evidence карточек, диагностика, кэш).
 """
 from __future__ import annotations
 
@@ -10,8 +13,10 @@ import asyncio
 import sys
 from collections.abc import Sequence
 
-from .config import DEFAULT_DETAILS_LIMIT, DEFAULT_SHOW_LISTINGS
-from .runner import run_hybrid_search
+from .config import DEFAULT_DETAILS_LIMIT, DEFAULT_PER_SOURCE_LIMIT, DEFAULT_SHOW_LISTINGS
+from .multi_source import run_multi_source_search
+from .runner import run_hybrid_search, run_report_from_json
+from .sources import available_sources
 
 
 def configure_stdout() -> None:
@@ -80,6 +85,46 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="не проверять диагностические страницы /earn* (только публичный фид)",
     )
+    parser.add_argument(
+        "--all-sources",
+        action="store_true",
+        help=(
+            "multi-source поиск оплачиваемых задач (superteam, github, bountybureau, "
+            "opire, warpspeed, openbounty) вместо гибридного поиска Superteam"
+        ),
+    )
+    parser.add_argument(
+        "--sources",
+        default=None,
+        help=f"источники через запятую (по умолчанию все: {', '.join(available_sources())})",
+    )
+    parser.add_argument(
+        "--per-source-limit",
+        type=int,
+        default=DEFAULT_PER_SOURCE_LIMIT,
+        help=f"сколько записей брать из каждого источника (по умолчанию {DEFAULT_PER_SOURCE_LIMIT})",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "показать человекочитаемый отчёт по последнему прогону из "
+            "superteam_results.json (без обращения к сайту)"
+        ),
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="вывести технический JSON (тот же документ, что сохраняется в superteam_results.json)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "подробный технический вывод: evidence карточек, диагностика источников, "
+            "статусы, статистика кэша (в обычном отчёте эти детали скрыты)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -98,4 +143,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     """
     configure_stdout()
     args = parse_args(argv)
+    if args.report:
+        return run_report_from_json(args)
+    if args.all_sources:
+        return asyncio.run(run_multi_source_search(args))
     return asyncio.run(run_hybrid_search(args))

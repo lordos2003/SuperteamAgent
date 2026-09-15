@@ -30,6 +30,7 @@ from typing import Any, Final, Mapping, Sequence
 import httpx
 
 from .api import card_url
+from .cache import get_cached_card, store_card
 from .config import (
     CARD_DESCRIPTION_FULL_LIMIT,
     CARD_DESCRIPTION_LIMIT,
@@ -42,6 +43,7 @@ from .config import (
     EXPIRED,
     NOT_FOUND,
     UNKNOWN,
+    VERIFIED_HUMAN_ONLY,
     VERIFIED_OPEN,
     WINNERS_ANNOUNCED,
 )
@@ -417,11 +419,14 @@ def decide_verification_status(signals: Mapping[str, Any], evidence: list[str]) 
 
     if signals["is_open_status"]:
         if deadline_moment is None:
-            evidence.append("card status=open, deadline not found on card")
-        else:
+            # Карточка «open», но deadline на ней не найден: подтвердить
+            # актуальность нельзя -> UNKNOWN (deadline НЕ считается подтверждённым).
             evidence.append(
-                f"card status=open and deadline {safe(signals['deadline_raw'])} > now"
+                "card status=open but deadline not found on card -> UNKNOWN "
+                "(deadline_confirmed=false, listing cannot be VERIFIED_OPEN)"
             )
+            return UNKNOWN
+        evidence.append(f"card status=open and deadline {safe(signals['deadline_raw'])} > now")
         return VERIFIED_OPEN
 
     if signals["has_structured_listing"]:
@@ -535,14 +540,77 @@ def _empty_card_result(slug: str) -> dict[str, Any]:
         "verification_status": UNKNOWN,
         "evidence": [],
         "error": "",
+        # --- явная модель «что именно проверила карточка» (см. п.10 задания) ---
+        "verification_url": "",
+        "verification_timestamp": "",
+        "verified_deadline": "",
+        "verified_reward": "",
+        "verified_currency": "",
+        "verified_agent_access": "UNKNOWN",
+        "verified_agent_access_unknown": True,
+        "verified_region": "",
+        "verified_winners": None,
+        "verified_submissions": None,
+        "from_cache": False,
+        "cache_age_seconds": None,
+        "verification_skipped": False,
     }
 
 
 def build_unverified_card(slug: str, reason: str) -> dict[str, Any]:
-    """Заготовка результата для задания, которое не проверялось по карточке."""
+    """Заготовка результата для задания, которое НЕ проверялось по карточке.
+
+    Такой результат принципиально имеет ``verification_status = UNKNOWN``: без
+    проверки карточки listing не может стать ``VERIFIED_OPEN``.
+    """
     result = _empty_card_result(safe(slug))
     result["evidence"] = [reason]
     result["error"] = reason
+    result["verification_skipped"] = True
+    result["verified_agent_access_unknown"] = True
+    return result
+
+
+def fill_verified_fields(result: dict[str, Any]) -> dict[str, Any]:
+    """Заполнить поля «что именно подтвердила карточка» (``verified_*``).
+
+    Значения берутся только из данных карточки; если карточка чего-то не сказала,
+    поле остаётся пустым/``UNKNOWN`` (данные не выдумываются).
+    """
+    confirmed_deadline = bool(result.get("deadline_confirmed"))
+    result["verified_deadline"] = str(result.get("deadline_utc") or "") if confirmed_deadline else ""
+    result["verified_reward"] = str(result.get("reward") or "")
+    result["verified_currency"] = str(result.get("token") or "")
+    access = str(result.get("agent_access") or "").strip().upper()
+    result["verified_agent_access"] = access or "UNKNOWN"
+    result["verified_agent_access_unknown"] = bool(
+        result.get("agent_access_unknown", not access)
+    )
+    result["verified_region"] = str(result.get("region") or result.get("region_text") or "")
+    result["verified_winners"] = bool(result.get("has_winners")) if result.get("has_winners") is not None else None
+    result["verified_submissions"] = result.get("submissions")
+    if not result.get("verification_timestamp"):
+        result["verification_timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return result
+
+
+def finalize_agent_access(result: dict[str, Any], evidence: list[str]) -> dict[str, Any]:
+    """Уточнить статус по agent access: human-only → ``VERIFIED_HUMAN_ONLY``.
+
+    Если карточка не сообщает agent access, значение НЕ придумывается: остаётся
+    ``UNKNOWN`` и выставляется ``agent_access_unknown = true``.
+    """
+    access = str(result.get("agent_access") or "").strip().upper()
+    if not access:
+        result["agent_access"] = "UNKNOWN"
+        result["agent_access_unknown"] = True
+        evidence.append("card does not state agent access -> agent_access UNKNOWN (no assumptions)")
+        return result
+    result["agent_access_unknown"] = access == "UNKNOWN"
+    evidence.append(f"card agent access: {access}")
+    if result.get("verification_status") == VERIFIED_OPEN and access == "HUMAN_ONLY":
+        result["verification_status"] = VERIFIED_HUMAN_ONLY
+        evidence.append("card marks this bounty as human-only -> VERIFIED_HUMAN_ONLY")
     return result
 
 
@@ -573,21 +641,33 @@ async def verify_listing_card(client: httpx.AsyncClient, slug: str) -> dict[str,
         evidence.append("slug is empty")
         return result
 
+    # Кэш: одна и та же карточка не скачивается слишком часто (TTL настраивается).
+    cached = get_cached_card(clean_slug)
+    if cached is not None:
+        return cached
+
+    result["verification_url"] = str(result["card_url"])
+    result["verification_timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     page = await fetch_card_page(client, clean_slug)
     result["reachable"] = bool(page["reachable"])
     result["http_status"] = page["http_status"]
     result["error"] = safe(page["error"])
 
     if not page["reachable"]:
+        # Сайт недоступен (сеть/Cloudflare/anti-bot/timeout): статус НЕ угадывается.
         if page["http_status"] == 404:
             result["verification_status"] = NOT_FOUND
-            evidence.append("card page HTTP 404 -> NOT_FOUND")
+            evidence.append("card page HTTP 404 -> UNKNOWN (status cannot be determined)")
+            fill_verified_fields(result)
+            store_card(clean_slug, result)
         else:
-            # Сайт недоступен: задание НЕ считается закрытым.
+            # Задание НЕ считается закрытым: данных нет.
             result["verification_status"] = UNKNOWN
             evidence.append(
                 f"card not reachable ({result['error']}) -> UNKNOWN, listing is NOT treated as closed"
             )
+            fill_verified_fields(result)
         return result
 
     html_text = page["html"]
@@ -608,7 +688,9 @@ async def verify_listing_card(client: httpx.AsyncClient, slug: str) -> dict[str,
         # Страница отвечает 200, но объекта задания в данных нет:
         # так сайт отдаёт несуществующий slug (проверено вживую).
         result["verification_status"] = NOT_FOUND
-        evidence.append("pageProps.listing is null -> NOT_FOUND")
+        evidence.append("pageProps.listing is null -> UNKNOWN (status cannot be determined)")
+        fill_verified_fields(result)
+        store_card(clean_slug, result)
         return result
 
     now = datetime.now(timezone.utc)
@@ -671,6 +753,9 @@ async def verify_listing_card(client: httpx.AsyncClient, slug: str) -> dict[str,
     result["reward_amount"] = card_reward_amount(listing, job_posting)
 
     result["verification_status"] = decide_verification_status(signals, evidence)
+    finalize_agent_access(result, evidence)
+    fill_verified_fields(result)
+    store_card(clean_slug, result)
     return result
 
 

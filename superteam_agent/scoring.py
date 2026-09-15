@@ -17,7 +17,15 @@ from datetime import datetime, timezone
 from typing import Any, Final, Mapping
 
 from .card import parse_utc
-from .config import UNKNOWN, VERIFIED_OPEN
+from .config import (
+    FINANCIAL_STATE_CONFIRMED_SAFE,
+    FINANCIAL_STATE_RISK_DETECTED,
+    FINANCIAL_STATE_UNKNOWN,
+    MIN_TEXT_FOR_FINANCIAL_LOW,
+    UNKNOWN,
+    VERIFIED_HUMAN_ONLY,
+    VERIFIED_OPEN,
+)
 from .risk import (
     FINANCIAL_RISK_MEDIUM,
     REAL_ACTIVITY_EXCLUSION,
@@ -535,6 +543,9 @@ def score_listing(listing: Mapping[str, Any]) -> dict[str, Any]:
 
     reward = reward_info(listing)
     agent_access = normalize_agent_access(listing.get("agent_access"))
+    agent_access_unknown = bool(
+        listing.get("agent_access_unknown", agent_access == "UNKNOWN")
+    )
     agent_score = AGENT_ACCESS_SCORES[agent_access]
     skills = detect_skills(text)
     difficulty = estimate_difficulty(text)
@@ -594,8 +605,13 @@ def score_listing(listing: Mapping[str, Any]) -> dict[str, Any]:
         why.append(f"protocol-level work (Rust/Solana) -> {protocol_penalty:+d}")
 
     verification_status = str(listing.get("verification_status") or UNKNOWN)
+    human_only_status = verification_status == VERIFIED_HUMAN_ONLY
+    human_only = bool(listing.get("human_only")) or human_only_status or agent_access == "HUMAN_ONLY"
     hard_exclusions: list[str] = []
-    if verification_status != VERIFIED_OPEN:
+    if verification_status != VERIFIED_OPEN and not human_only_status:
+        # Любой статус, кроме подтверждённо-открытого, — жёсткое исключение.
+        # VERIFIED_HUMAN_ONLY не исключается: такие задачи попадают только в
+        # отдельный список human-only и никогда — в агентские.
         hard_exclusions.append(f"card verification: {verification_status}")
     if deadline_moment is None:
         hard_exclusions.append("deadline not confirmed on card")
@@ -611,22 +627,41 @@ def score_listing(listing: Mapping[str, Any]) -> dict[str, Any]:
     decision = "EXCLUDE" if hard_exclusions else "CANDIDATE"
     exclusion_reason = hard_exclusions[0] if hard_exclusions else ""
 
+    # Состояние финансового риска: отсутствие найденных рисков — доказательство
+    # безопасности только при достаточном тексте карточки.
+    description_text = str(listing.get("description_full") or listing.get("description") or "")
+    if risk["hard_exclusion"]:
+        financial_risk_state = FINANCIAL_STATE_RISK_DETECTED
+    elif risk["financial_risk"] == FINANCIAL_RISK_MEDIUM:
+        financial_risk_state = FINANCIAL_STATE_UNKNOWN
+    elif len(description_text.strip()) >= MIN_TEXT_FOR_FINANCIAL_LOW:
+        financial_risk_state = FINANCIAL_STATE_CONFIRMED_SAFE
+    else:
+        financial_risk_state = FINANCIAL_STATE_UNKNOWN
+
+    priority = (
+        "HIGH"
+        if score >= PRIORITY_HIGH_THRESHOLD
+        else "MEDIUM"
+        if score >= PRIORITY_MEDIUM_THRESHOLD
+        else "LOW"
+    )
+
     return {
         "score": score,
         "score_breakdown": breakdown,
         "why": why[:8],
         "estimated_fit": estimated_fit(score),
-        "priority": (
-            "HIGH"
-            if score >= PRIORITY_HIGH_THRESHOLD
-            else "MEDIUM"
-            if score >= PRIORITY_MEDIUM_THRESHOLD
-            else "LOW"
-        ),
+        # Исключённая задача не может иметь высокий приоритет, даже если её
+        # «сырой» score большой (например устаревший API-listing с OPEN).
+        "priority": "EXCLUDED" if hard_exclusions else priority,
+        "effective_priority": "EXCLUDED" if hard_exclusions else priority,
         "reward_amount": reward["reward_amount"],
         "reward_currency": reward["reward_currency"],
         "reward_type": reward["reward_type"],
         "agent_access": agent_access,
+        "agent_access_unknown": agent_access_unknown,
+        "human_only": human_only,
         "skills": skills["skills"],
         "difficulty": difficulty["difficulty"],
         "difficulty_indicators": difficulty["indicators"],
@@ -637,6 +672,7 @@ def score_listing(listing: Mapping[str, Any]) -> dict[str, Any]:
         "hours_until_deadline": time_data["hours_until_deadline"],
         "submissions": competition["submissions"],
         "financial_risk": risk["financial_risk"],
+        "financial_risk_state": financial_risk_state,
         "requires_own_money": risk["requires_own_money"],
         "requires_real_mainnet_activity": risk["requires_real_mainnet_activity"],
         "requires_real_trade": risk["requires_real_trade"],

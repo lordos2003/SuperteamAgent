@@ -29,3 +29,8 @@ data/
 # Отчёты пересоздаются при каждом запуске
 verified_listings.json
 superteam_results.json
+bounty_results.json
+superteam_report.md
+superteam_report.xlsx
+# Кэш проверки карточек (TTL настраивается SUPERTEAM_VERIFICATION_CACHE_TTL)
+verification_cache.json

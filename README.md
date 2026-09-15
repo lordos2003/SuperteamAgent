@@ -10,6 +10,9 @@
 * Этап 4 — intelligent filtering + ranking: детерминированный rule-based скоринг
   (reward, agent access, стек, сложность, конкуренция, время), TOP-разделы и
   отдельные списки agent-compatible / human-only.
+* Этап 5 — multi-source поиск оплачиваемых задач за пределами Superteam:
+  GitHub Issues, Bounty Bureau, Opire, warpSpeed, OpenBounty (`--all-sources`)
+  с обязательной проверкой первоисточника и жёстким финансовым/региональным фильтром.
 
 Скрипт один раз читает API key из локального файла `.env` и дальше запускается
 без повторного ввода ключа.
@@ -25,7 +28,8 @@
 * публичная лента сайта (страницы + публичный JSON-фид) — актуальные задания;
 * объединение источников по `slug` с флагами `source_api` / `source_website`;
 * проверка каждой карточки: `verify_listing_card(slug)` возвращает `VERIFIED_OPEN` /
-  `EXPIRED` / `CLOSED` / `COMPLETED` / `WINNERS_ANNOUNCED` / `NOT_FOUND` / `UNKNOWN`;
+  `VERIFIED_EXPIRED` / `VERIFIED_CLOSED` / `VERIFIED_WINNER_ANNOUNCED` /
+  `VERIFIED_HUMAN_ONLY` / `UNKNOWN`;
 * фильтр актуальности (только `VERIFIED_OPEN` с непрошедшим deadline) и
   анализ финансового риска (`financial_risk`, `requires_own_money`);
 * детерминированный скоринг `score_listing()`: `score`, `score_breakdown`,
@@ -86,7 +90,8 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 python -m pip install -r requirements.txt
 ```
 
-Устанавливаются только два пакета: `httpx` и `python-dotenv`.
+Устанавливаются `httpx`, `python-dotenv` и `openpyxl` (последний — только для
+Excel-отчёта `superteam_report.xlsx`).
 
 Для запуска тестов дополнительно:
 
@@ -119,8 +124,13 @@ SUPERTEAM_API_KEY=PASTE_API_KEY_HERE
 ### 5. Запустить
 
 ```powershell
-python -m superteam_agent
+python superteam_agent.py        # или: python -m superteam_agent
 ```
+
+Вывод — человекочитаемый отчёт (`AVAILABLE BOUNTIES` / `EXCLUDED` /
+`UNKNOWN` / `SUMMARY`) со ссылкой на карточку каждого задания; он же
+сохраняется в `superteam_report.md`. Технические детали — с флагом `--debug`,
+технический JSON — с `--json`, повторный отчёт без обращений к сайту — `--report`.
 
 Ожидаемый вывод (фактический прогон):
 
@@ -287,14 +297,21 @@ Card: https://superteam.fun/earn/listing/steve-agent-arena-launch-your-agent-and
 
 | Команда | Что делает |
 | --- | --- |
-| `python -m superteam_agent` | гибридный поиск: Agent API + сайт + проверка всех карточек + оценки |
-| `python -m superteam_agent --verify-limit 10` | проверить карточки только для первых 10 уникальных заданий (0 = все) |
-| `python -m superteam_agent --no-verify` | без проверки карточек (только данные источников) |
-| `python -m superteam_agent --show 25` | сколько записей показать в режиме `--no-verify` |
-| `python -m superteam_agent --details 5` | дополнительно запросить Agent API details для первых 5 кандидатов |
-| `python -m superteam_agent --slug some-slug` | запросить Agent API details для конкретного slug |
-| `python -m superteam_agent --raw` | напечатать JSON ответов API (секреты вырезаны) |
-| `python -m superteam_agent --no-diagnostics` | не проверять диагностические страницы `/earn*` (только публичный JSON-фид) |
+| `python superteam_agent.py` / `python -m superteam_agent` | гибридный поиск + короткая сводка в консоли + **Excel-отчёт** `superteam_report.xlsx` (листы `SUMMARY`/`AVAILABLE`/`EXCLUDED`/`UNKNOWN`) |
+| `python superteam_agent.py --report` | только отчёт (Excel + консоль) по последнему прогону из `superteam_results.json` — без обращения к сайту |
+| `python superteam_agent.py --json` | технический JSON (тот же документ, что сохраняется в `superteam_results.json`) |
+| `python superteam_agent.py --debug` | подробный технический вывод: evidence карточек, диагностика источников, статусы, кэш |
+| `python superteam_agent.py --verify-limit 10` | проверить карточки только для первых 10 уникальных заданий (0 = все) |
+| `python superteam_agent.py --no-verify` | **только для отладки**: карточки не проверяются, поэтому все задания получают `UNKNOWN` и `EXCLUDE` (обычный режим всегда выполняет verification) |
+| `python superteam_agent.py --show 25` | сколько записей показать в режиме `--no-verify` |
+| `python superteam_agent.py --details 5` | (с `--debug`) дополнительно запросить Agent API details для первых 5 кандидатов |
+| `python superteam_agent.py --slug some-slug` | (с `--debug`) запросить Agent API details для конкретного slug |
+| `python superteam_agent.py --raw` | (с `--debug`) напечатать JSON ответов API (секреты вырезаны) |
+| `python superteam_agent.py --no-diagnostics` | не проверять диагностические страницы `/earn*` (только публичный JSON-фид) |
+| `python superteam_agent.py --all-sources` | multi-source поиск: Superteam + GitHub + Bounty Bureau + Opire + warpSpeed + OpenBounty |
+| `python superteam_agent.py --all-sources --sources github,opire` | только выбранные источники (доступные имена см. ниже) |
+| `python superteam_agent.py --all-sources --per-source-limit 10` | сколько записей брать из каждого источника (по умолчанию 25) |
+
 
 `--raw` полезен, если структура JSON на сервере отличается от ожидаемой:
 вы видите фактический ответ (уже без секретов) и можете адаптировать поля.
@@ -466,27 +483,116 @@ https://superteam.fun/earn/listing/{slug}
 
 | Статус | Значение |
 | --- | --- |
-| `VERIFIED_OPEN` | карточка существует, submissions открыты, deadline не прошёл |
-| `EXPIRED` | deadline карточки уже прошёл (даже если API говорит OPEN) |
-| `CLOSED` | статус/unpublished/текст говорят о закрытии или приёме заявок завершён |
-| `COMPLETED` | карточка сообщает о завершении задания |
-| `WINNERS_ANNOUNCED` | объявлены winners (`isWinnersAnnounced`, `winnersAnnouncedAt`, query `winners`, текст) |
-| `NOT_FOUND` | HTTP 404 или `listing = null` (карточки нет) |
-| `UNKNOWN` | сайт недоступен/данных недостаточно — задание **не** считается закрытым |
+| `VERIFIED_OPEN` | карточка открылась, подтверждает открытый bounty и deadline в будущем |
+| `VERIFIED_EXPIRED` | deadline **карточки** уже прошёл (даже если API говорит OPEN) |
+| `VERIFIED_CLOSED` | статус/unpublished/текст говорят о закрытии, completed или judging |
+| `VERIFIED_WINNER_ANNOUNCED` | объявлены winners (`isWinnersAnnounced`, `winnersAnnouncedAt`, query `winners`, текст) |
+| `VERIFIED_HUMAN_ONLY` | карточка явно помечает bounty как human-only (`agentAccess=HUMAN_ONLY`) |
+| `UNKNOWN` | сайт недоступен / 404 / `listing = null` / нет deadline — статус определить нельзя |
+
+`UNKNOWN` **никогда** не превращается в `VERIFIED_OPEN`: API-статус `OPEN` не
+является доказательством, доказательство даёт только карточка.
+
+Старые имена сохранены как алиасы (`CLOSED`/`COMPLETED` → `VERIFIED_CLOSED`,
+`EXPIRED` → `VERIFIED_EXPIRED`, `WINNERS_ANNOUNCED` → `VERIFIED_WINNER_ANNOUNCED`,
+`NOT_FOUND` → `UNKNOWN`), поэтому прежний код и отчёты продолжают читаться.
 
 ### Порядок принятия решения
 
 Статус определяется **совокупностью** сигналов, а не одним ключевым словом:
 
-1. winners (structured → query → текст) → `WINNERS_ANNOUNCED`;
-2. deadline карточки < текущего времени UTC → `EXPIRED`;
-3. закрытие (текст, `isPublished=false`, статус closed/cancelled) → `CLOSED`;
-4. статус completed/finished → `COMPLETED`; статус review/judging → `CLOSED`;
-5. статус open и deadline не прошёл (или deadline на карточке нет) → `VERIFIED_OPEN`;
-6. иначе → `UNKNOWN`.
+1. winners (structured → query → текст) → `VERIFIED_WINNER_ANNOUNCED`;
+2. deadline **карточки** < текущего времени UTC → `VERIFIED_EXPIRED`;
+3. закрытие (текст, `isPublished=false`, статус closed/cancelled) → `VERIFIED_CLOSED`;
+4. статус completed/finished → `VERIFIED_CLOSED`; статус review/judging → `VERIFIED_CLOSED`;
+5. статус open и deadline с карточки в будущем → `VERIFIED_OPEN`;
+5a. статус open, но deadline на карточке **не найден** → `UNKNOWN`
+   (`deadline_confirmed=false` — подтвердить актуальность нельзя);
+6. `agentAccess=HUMAN_ONLY` при открытой карточке → `VERIFIED_HUMAN_ONLY`;
+7. иначе → `UNKNOWN`.
 
 Метка результата в консоли: `VERIFIED_OPEN` → `CANDIDATE`,
+`VERIFIED_HUMAN_ONLY` → `HUMAN_ONLY` (отдельный список, никогда не в агентские),
 `UNKNOWN` → `MANUAL_CHECK`, остальное → `EXCLUDE`.
+
+### API = discovery, card = verification
+
+API и публичный фид используются только для **обнаружения** заданий. Итоговый
+статус определяет карточка, и приоритет источников такой:
+
+1. **verified card** — источник истины (статус, deadline, reward, token, agent access, winners, submissions);
+2. **website data** — уточняет то, чего нет в карточке;
+3. **API data** — только для обнаружения.
+
+Расхождения не скрываются, а пишутся в отчёт: `api_status` / `api_deadline` /
+`api_agent_access`, `website_status` / `website_deadline` / `website_reward`,
+`verified_deadline` / `verified_reward` / `verified_currency` /
+`verified_agent_access` / `verified_region` / `verified_winners` /
+`verified_submissions` + `verification_url` / `verification_timestamp` и `evidence`.
+
+Классический случай (проверено вживую): API отдаёт `OPEN` и deadline
+`2026-03-16`, а карточка подтверждает `isWinnersAnnounced=true` → итог
+`VERIFIED_WINNER_ANNOUNCED`, `final_decision = EXCLUDE`, приоритет `EXCLUDED`.
+
+### Почему verification могла «пропускаться»
+
+Обычный запуск (`python -m superteam_agent`) **всегда** проверяет карточки:
+`--no-verify` — opt-in флаг для отладки, а не режим по умолчанию. Если он включён
+(или задан слишком маленький `--verify-limit N`, из-за которого часть кандидатов
+остаётся без проверки), то `_verify_cards()` возвращает `build_unverified_card()`,
+и дальше всё идёт по цепочке:
+
+```
+verification_status = UNKNOWN  →  deadline_confirmed = false
+   →  hard exclusion "card verification: UNKNOWN" + "deadline not confirmed on card"
+   →  final_decision = EXCLUDE
+```
+
+Именно поэтому такие прогоны выглядят как «все задания исключены». Теперь:
+
+* в начале секции `=== CARD VERIFICATION ===` печатается явное предупреждение,
+  если `--no-verify` включён;
+* `UNKNOWN` никогда не становится `VERIFIED_OPEN`, а попадает в
+  `=== UNKNOWN / VERIFICATION FAILED ===` с причиной;
+* в статистике видны `Verified` и `Unknown`, поэтому пропуск проверки заметен сразу.
+
+### `verified_open_listings` (самый строгий список)
+
+В `superteam_results.json` есть отдельный список `verified_open_listings` —
+только листинги, которые **одновременно**:
+
+* карточка реально открылась и подтверждает открытый bounty (`VERIFIED_OPEN`);
+* deadline подтверждён карточкой (`deadline_confirmed = true`) и не прошёл;
+* winners не объявлены;
+* agent access определён явно и это не `HUMAN_ONLY` (`agent_access_unknown = false`);
+* финансовый риск допустим (`LOW`, без флагов `requires_*`);
+* проходят существующую финальную фильтрацию (`is_agent_compatible`: eligibility `ELIGIBLE`, `final_decision = CANDIDATE`).
+
+Любой `UNKNOWN` в этот список попасть не может. Пустой список — нормальный
+результат, если таких заданий сейчас нет.
+
+### Кэш проверки карточек (TTL)
+
+Чтобы не скачивать одну и ту же карточку в каждом прогоне, используется кэш
+`verification_cache.json` с TTL (по умолчанию 900 секунд, настраивается
+переменной окружения):
+
+```powershell
+$env:SUPERTEAM_VERIFICATION_CACHE_TTL = "3600"   # час
+$env:SUPERTEAM_VERIFICATION_CACHE_TTL = "0"      # полностью отключить кэш
+```
+
+Устаревший статус не может «залипнуть»: по истечении TTL карточка скачивается
+заново, а в `evidence` попадает строка вида
+`verification reused from cache (age=42s, ttl=900s)`.
+
+### Про Playwright
+
+Playwright не нужен и не используется: карточка Superteam — серверный рендеринг,
+и фактические данные лежат в HTML (`__NEXT_DATA__ → props.pageProps.listing`,
+JSON-LD `JobPosting`, meta-теги). Проверено вживую (HTTP 200, полный объект
+listing). Если сайт когда-нибудь перейдёт на клиентский рендеринг, карточка
+станет `UNKNOWN` — это будет видно в `=== UNKNOWN / VERIFICATION FAILED ===`.
 
 ### Файл `verified_listings.json`
 
@@ -526,7 +632,7 @@ https://superteam.fun/earn/listing/{slug}
 
 | Условие | Почему |
 | --- | --- |
-| `verification_status` ≠ `VERIFIED_OPEN` (`EXPIRED`/`CLOSED`/`COMPLETED`/`WINNERS_ANNOUNCED`/`NOT_FOUND`/`UNKNOWN`) | карточка — источник истины |
+| `verification_status` ≠ `VERIFIED_OPEN` (`VERIFIED_EXPIRED`/`VERIFIED_CLOSED`/`VERIFIED_WINNER_ANNOUNCED`/`UNKNOWN`); `VERIFIED_HUMAN_ONLY` не исключается, но идёт только в human-only | карточка — источник истины |
 | дедлайн на карточке не найден или уже прошёл | актуальность |
 | `winners already announced` | задание закрыто |
 | `decision = EXCLUDE` с `exclusion_reason = REAL_FINANCIAL_ACTIVITY_REQUIRED` | для обязательной части нужна реальная mainnet-финансовая активность |
@@ -589,8 +695,112 @@ trade data», «Review a trading interface without performing transactions»; о
 sandbox, mock, simulated/paper trading, faucet tokens, fake/dummy tokens,
 local blockchain/net/local validator, free API sandbox.
 
-### Разделы вывода
+### Excel-отчёт `superteam_report.xlsx` (основной результат)
 
+Обычный запуск печатает **короткую** сводку в консоль и создаёт Excel-файл
+`superteam_report.xlsx` с четырьмя листами: `SUMMARY`, `AVAILABLE`, `EXCLUDED`,
+`UNKNOWN`. Главное правило: лист `AVAILABLE` заполняется ТОЛЬКО из результата
+финальной фильтрации (`is_verified_open_listing()`), поэтому ссылка на
+исключённое задание физически не может туда попасть.
+
+Лист `AVAILABLE` (колонки `#`, `Priority`, `Score`, `Task`, `Reward Amount`,
+`Currency`, `Deadline (UTC)`, `Days Left`, `Agent Access`, `Difficulty`, `Risk`,
+`Eligibility`, `Region`, `Submissions`, `Type`, `What to build`, `Open Card`):
+награда — отдельными числовыми колонками, дедлайн — настоящая дата Excel,
+`Days Left` подсвечивается (≤3 дней — красным, ≤7 — жёлтым), `Priority`
+закрашивается (HIGH/MEDIUM/LOW), а в колонке `Open Card` лежит **настоящая
+гиперссылка** на `card_url` с коротким текстом (длинный URL в ячейке не выводится).
+
+Лист `EXCLUDED` — для ручного анализа: `Why excluded` содержит короткую
+человеческую причину (`Winners already announced`, `Human-only bounty`,
+`Requires own funds`, `Region restriction`, `Deadline has passed`), сортировка —
+сначала потенциально интересные (AGENT_ONLY/AGENT_ALLOWED → HUMAN_ONLY →
+остальные), внутри группы по score. Технические формулировки остаются в JSON.
+
+Консоль (обычный режим, без URL и без списка исключённых):
+
+```text
+============================================================
+SUPERTEAM AGENT
+============================================================
+
+  Discovery:        33
+  Unique:           32
+  Verified:         32
+
+  AVAILABLE:        0
+  EXCLUDED:         32
+  UNKNOWN:          0
+
+No bounty passed all filters.
+
+Excel report:
+  D:\Projects\SuperteamAgent\superteam_report.xlsx
+
+============================================================
+```
+
+Если подходящие задания есть, вместо строки `No bounty passed all filters.`
+печатается короткий список (без URL):
+
+```text
+AVAILABLE FOR AGENT:
+
+  1. Steve Agent Arena — 500 USDC — HIGH
+  2. Build and Demo a Mermail Skill — 500 USDC — MEDIUM
+```
+
+Состав листов:
+
+| Лист | Содержимое |
+| --- | --- |
+| `SUMMARY` | dashboard: Generated, Available / Excluded / Unknown, Verified / Discovered, разбивка (Agent Allowed, Human Only, Winner Announced, Risk Excluded, Expired) |
+| `AVAILABLE` | только задания, прошедшие ВСЕ фильтры; ссылка `Open card` → `card_url` |
+| `EXCLUDED` | исключённые задания с короткой причиной (для ручного анализа) |
+| `UNKNOWN` | задания, у которых карточку проверить не удалось (НИКОГДА не в AVAILABLE) |
+
+Особенности:
+
+* на `AVAILABLE` ссылка оформлена как настоящая Excel-гиперссылка (`cell.hyperlink`),
+  текст ячейки — короткий (`Open card`), длинный URL в ячейке не выводится;
+* награда разделена на числовые колонки `Reward Amount` и `Currency`;
+* дедлайн хранится как дата Excel (UTC) с форматом `dd mmm yyyy hh:mm` и колонкой
+  `Days Left` (условное выделение: ≤3 дней — красным, ≤7 — жёлтым);
+* таблицы с `freeze panes`, `autofilter`, автошириной колонок, границами и
+  переносом текста; описания обрезаны (~320 символов);
+* `superteam_report.md` остаётся как компактный Markdown-summary со ссылками,
+  а `superteam_results.json` — как machine-readable источник (технические причины,
+  evidence, `hard_exclusion_reasons`);
+
+* `AVAILABLE FOR AGENT` — только задания, прошедшие `is_verified_open_listing()`
+  (карточка подтвердила открытость, deadline подтверждён и в будущем, winners нет,
+  agent access определён и это не `HUMAN_ONLY`, финансовый риск `LOW`,
+  eligibility `ELIGIBLE`). Сортировка: priority → score ↓ → ближайший deadline;
+* `EXCLUDED` — всё остальное, с короткой человеческой причиной
+  («Winners have already been announced.», «Deadline has passed.»,
+  «Requires own funds / financial risk.», «AI agents are not eligible (human-only bounty).»);
+* `UNKNOWN / VERIFICATION FAILED` — карточку проверить не удалось; такие задания
+  **никогда** не попадают в Available;
+* `SUMMARY` — счётчики, посчитанные из фактических данных прогона.
+
+Особенности:
+
+* `Card:` — реальный `card_url` из проверки; в Windows Terminal это кликабельная
+  ссылка (ANSI OSC 8), причём видимый текст — сам URL, поэтому fallback работает
+  всегда. Отключить: `$env:SUPERTEAM_NO_HYPERLINKS="1"`;
+* даты — `20 Sep 2026, 21:59 UTC` (внутри — timezone-aware datetime, снаружи —
+  человеческий формат);
+* `superteam_report.md` — тот же отчёт в Markdown со ссылками
+  `[Open card](url)`, открывается в VS Code/GitHub;
+* технические детали (`__NEXT_DATA__ present`, `pageProps.listing`, json-ld,
+  UUID-запросы, `verification_skipped`, ключи кэша) в обычном режиме **не
+  печатаются** — они доступны через `--debug`.
+
+### Технические разделы (только `--debug`)
+
+* `=== VERIFIED OPEN ===` — список `verified_open_listings`: только подтверждённые
+  карточкой открытые задачи, подходящие агенту (reward / deadline / agent access /
+  risk / score / URL);
 * `=== TOP OPPORTUNITIES ===` — до 3 заданий с **положительным** score (в формате
   Reward / Deadline / Agent access / Region / Difficulty / Financial risk /
   Own money / Estimated fit / Score / Why / Card);
@@ -610,7 +820,13 @@ local blockchain/net/local validator, free API sandbox.
   `=== TOP HUMAN-ONLY ===` (печатается отдельно, как исключённый из агентской выдачи);
 * `=== MANUAL ELIGIBILITY CHECK ===` — кандидаты с `eligibility_status = UNKNOWN`
   (печатается только если такие есть);
-* `=== VERIFIED OPEN ===` — полный список всех прошедших фильтр.
+* `=== EXCLUDED ===` — все исключённые задачи: Title / Status / Reason / URL;
+* `=== UNKNOWN / VERIFICATION FAILED ===` — задачи, по которым статус определить
+  не удалось, с причиной и evidence (сайт/парсер/404/нет deadline);
+* `=== STATISTICS ===` — итоговые счётчики: Discovered, Unique, Pre-filtered,
+  Verified, Verified Open, Expired, Closed, Human Only, Winner Announced,
+  Unknown, Risk Excluded;
+* `=== VERIFIED OPEN ===` — полный список всех прошедших фильтр (см. выше).
 
 В каждом элементе печатаются строки `Decision:` и `Exclusion reason:`.
 
@@ -701,17 +917,46 @@ D:\Projects\SuperteamAgent\
         website.py          # collect_website_source (фид + диагностика), merge_sources
         risk.py             # analyze_financial_risk (mainnet-активность, флаги)
         scoring.py          # score_listing, reward/tech/difficulty/region/time info
-        output.py           # печать секций и запись JSON-отчётов
-        runner.py           # build_final_entry, async run_hybrid_search
-    tests/                  # pytest: 6 тестовых модулей, 63 теста
+        output.py           # печать технических секций и запись JSON-отчётов
+        report.py           # разделы отчёта, причины, компактный консольный вывод, Markdown
+        excel_report.py     # Excel-отчёт (openpyxl): SUMMARY / AVAILABLE / EXCLUDED / UNKNOWN
+        runner.py           # build_final_entry, async run_hybrid_search, --report
+        cache.py            # TTL-кэш проверки карточек (verification_cache.json)
+        multi_source.py     # --all-sources: дедупликация, классификация, bounty_results.json
+        core/               # ядро multi-source (не зависит от конкретных источников)
+            models.py       # единая модель задачи, разбор награды/валюты, ключи дедупликации
+            verification.py # проверка первоисточника: GitHub issue, страница bounty
+            filters.py      # политика: финансы, регион, human-only, награда, aggregator-посты
+            ranking.py      # ранжирование: crypto → no-risk → open → beginner → reward → region
+        sources/            # адаптеры источников (независимые модули)
+            base.py         # SourceResult, fetch_json, probe_hosts, finalize_candidate
+            superteam.py    # существующая гибридная логика Superteam
+            github.py       # GitHub Search API + проверка issue
+            bountybureau.py # /api/bounties (certified) + проверка issue
+            opire.py        # api.opire.dev/rewards + проверка issue
+            warpspeed.py    # честная проверка хостов (сейчас NOT_FOUND)
+            openbounty.py   # честная проверка хостов (сейчас NOT_FOUND)
+    tests/                  # pytest: 13 тестовых модулей, 145 тестов
         test_secrets.py     # маскирование ключей, to_safe_json
         test_card.py        # e2e на httpx.MockTransport (фикстуры HTML-карточек)
         test_risk.py        # правила финансового риска (trades/testnet/deposit)
         test_scoring.py     # breakdown score, hard exclusions, region, fit
         test_merge.py       # объединение источников по slug
         test_utils.py       # парсеры/форматтеры (JSON-LD, meta, next_data и др.)
+        test_models.py      # разбор награды/валюты, ключи дедупликации
+        test_verification.py# closed/assigned/merged PR/claimed/rate limit (MockTransport)
+        test_filters.py     # финансовый фильтр, регион, human-only, «нет суммы»
+        test_multi_source.py# дедупликация, классификация, ранжирование, отчёт
+        test_verification_flow.py # 9 сценариев card verification + TTL-кэш
+        test_report.py      # человекочитаемый отчёт: 14 сценариев
+        test_excel_report.py# Excel: листы, гиперссылки, сортировка, summary
     superteam_results.json  # результат гибридного поиска (создаётся автоматически)
     verified_listings.json  # отчёт проверки карточек (создаётся автоматически)
+    bounty_results.json     # сводный отчёт multi-source поиска (создаётся автоматически)
+    superteam_report.xlsx   # Excel-отчёт (создаётся автоматически)
+    superteam_report.md     # компактный Markdown summary (создаётся автоматически)
+    verification_cache.json # TTL-кэш проверки карточек (создаётся автоматически)
+    superteam_agent.py      # лончер: python superteam_agent.py == python -m superteam_agent
 ```
 
 Код модульный: каждый модуль отвечает за один слой (конфигурация, секреты,
@@ -726,19 +971,31 @@ HTTP, Agent API, парсинг, карточка, сайт, риск, скор�
 
 ## Тесты
 
-* 63 теста, `pytest`; синхронные тесты + асинхронный e2e через `asyncio.run`
+* 145 тестов, `pytest`; синхронные тесты + асинхронный e2e через `asyncio.run`
   (плагин `pytest-asyncio` не нужен);
 * реальные запросы не отправляются: Agent API и карточки — на фикстурах HTML и
   `httpx.MockTransport`, секреты — на заведомо подставленных значениях;
 * покрываются: маскирование секретов, e2e проверки карточки (открытая/ winners/
   expired/ closed/ null/404/403/submissionCount), правила финансового риска,
-  breakdown score и hard exclusions, объединение источников, парсеры.
+  breakdown score и hard exclusions, объединение источников, парсеры;
+* multi-source: `tests/test_models.py` (разбор награды/валюты),
+  `tests/test_verification.py` (closed/assigned/merged PR/claimed/rate limit),
+  `tests/test_filters.py` (финансы, регион, human-only, награда),
+  `tests/test_multi_source.py` (дедупликация, классификация, ранжирование);
+* пайплайн карточек: `tests/test_verification_flow.py` — девять обязательных
+  сценариев (expired/closed/winners/human-only/unknown, приоритет карточки над API,
+  `agent_access_unknown`, eligible-кандидат) + поведение TTL-кэша;
+* отчёт: `tests/test_report.py` — 14 сценариев (Available/Excluded/Unknown,
+  ссылка на карточку, Markdown-ссылка, сортировка, summary, приоритет карточки);
+* Excel: `tests/test_excel_report.py` — 16 сценариев (листы SUMMARY/AVAILABLE/
+  EXCLUDED/UNKNOWN, гиперссылки ведут на `card_url`, исключённые задачи не попадают
+  на `AVAILABLE`, сортировка `EXCLUDED`, разделение reward/currency, подсветка срочности).
 
 ```powershell
 python -m pytest -q
 ```
 
-Ожидаемый результат: `63 passed`.
+Ожидаемый результат: `145 passed`.
 
 ---
 
@@ -777,6 +1034,151 @@ python -m pytest -q
 | `REGION_RESTRICTED` в результатах | регион пользователя не задан: укажите `$env:SUPERTEAM_USER_REGION="Ukraine"` (или другую страну), чтобы совпадение/несовпадение считалось автоматически |
 | Все задачи дополнительно помечены `HUMAN_ONLY` | в текущей ленте сайта нет агентских заданий: они появятся в `TOP AGENT-COMPATIBLE` (и `AGENT_ONLY` видны только через Agent API) |
 | Кириллица «кракозябрами» | в интерактивном терминале Unicode выводится корректно; при перенаправлении вывода в файл запускайте `chcp 65001` и смотрите файл в VS Code |
+
+---
+
+## MULTI-SOURCE ПОИСК ОПЛАЧИВАЕМЫХ ЗАДАЧ (`--all-sources`)
+
+Поиск оплачиваемых задач не только на Superteam Earn, а сразу по нескольким
+независимым источникам. Существующая логика Superteam при этом не меняется:
+она доступна и как отдельный прогон (`python -m superteam_agent`), и как один из
+источников multi-source поиска.
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m superteam_agent --all-sources                                  # все источники
+python -m superteam_agent --all-sources --sources github,opire           # только выбранные
+python -m superteam_agent --all-sources --per-source-limit 10            # лимит на источник
+```
+
+Сводный отчёт: `bounty_results.json` (секреты вырезаются).
+
+### Источники и их фактический статус
+
+| Источник | Что даёт | Чем подтверждается первоисточник |
+| --- | --- | --- |
+| `superteam` | Agent API + публичная лента + карточка | существующая логика проекта (карточка = истина) |
+| `github` | GitHub Search API: `label:bounty`, `label:"💎 Bounty"`, `bounty in:title`, USDC-варианты | конкретный issue (state/assignee/PR/claimed/paid) |
+| `bountybureau` | `https://bountybureau.com/api/bounties` (certified: tier/score/status/payout) | конкретный issue из записи (`owner/repo#number`) |
+| `opire` | `https://api.opire.dev/rewards` (пагинация по 30, поле `url` → GitHub issue) | конкретный issue из `url` |
+| `warpspeed` | — (проверено: `warpspeed.xyz` продаётся как домен, `warpspeed.dev` — парковка) | `NOT_FOUND`, доказательства в `diagnostics.probes` |
+| `openbounty` | — (проверено: `openbounty.xyz`/`.com`/`openbounties.com` — парковка, `openbounty.dev` — нет DNS) | `NOT_FOUND`, доказательства в `diagnostics.probes` |
+
+Статус каждого источника пишется честно: `OK` / `EMPTY` / `PARTIAL` / `ERROR` /
+`NOT_FOUND` + причина. Недоступный источник не «дорисовывается»: `discovered = 0`.
+
+### КРИТИЧЕСКОЕ ПРАВИЛО: агрегатор — не доказательство
+
+Каждая найденная задача проверяется по ПЕРВОИСТОЧНИКУ — конкретному GitHub issue
+или конкретной странице bounty. Подтверждается:
+
+* issue действительно `open` (и не `state_reason=not_planned`, не `locked`);
+* нет assignee (задача не закреплена за исполнителем);
+* нет merge/закрытого PR, ссылающегося на issue (bounty фактически отработан);
+* нет признаков `claimed`/`paid`/`rewarded` в комментариях, labels и timeline;
+* есть реальная сумма награды (`labels` → `title` → `body` → bounty-комментарии
+  платформ вида «A bounty of $5000 has been created…»);
+* issue не является постом-агрегатором (`[radar]`, «Bounty Alert», «N new
+  opportunities found»).
+
+Как это выглядит в коде: `sources/*.py` только ОБНАРУЖИВАЮТ задачи,
+`core/verification.py` проверяет первоисточник, `core/filters.py` применяет
+политику, `core/ranking.py` ранжирует. Ошибка одного источника не останавливает
+поиск: адаптеры запускаются параллельно, ошибка превращается в `ERROR` + причина.
+
+---
+
+### Жёсткий финансовый фильтр
+
+Задача исключается, если для ОБЯЗАТЕЛЬНОЙ части нужны деньги исполнителя:
+свои USDC/USDT/SOL, депозит, пополнение баланса, покупка токенов, свой gas,
+реальные сделки, mandatory real mainnet trading. «Sponsored Free Lane»,
+refund, reimbursement и бонус за бесплатный путь это НЕ отменяют
+(реализовано в существующем `risk.py`, повторно используется без изменений).
+
+Разрешено: testnet, devnet, sandbox, mock, simulated/paper trading, бесплатные API,
+локальное окружение, тестовые токены без ценности.
+
+Дополнительно (строже, чем раньше): если из текста НЕ видно, нужны ли свои деньги
+(описание короче 80 символов или совпадает с заголовком), ставится
+`financial_risk = UNKNOWN`, и задача не попадает в recommended до ручной проверки.
+
+### Регион
+
+* `Russia excluded` (явный запрет или санкционные формулировки) → `agent_compatible = false`;
+* ограничение конкретными странами → `Restricted`, в top не попадает;
+* явное `worldwide`/`anywhere`/`open to everyone` → `Global`;
+* регион не указан → `UNKNOWN` и **НЕ считается автоматически подходящим**:
+  задача уходит в `needs_manual_check`.
+
+Ослабить последнее правило можно одним флагом в `superteam_agent/config.py`:
+`ALLOW_UNKNOWN_REGION_IN_TOP = True`. Аналогичные флаги есть для неизвестного и
+MEDIUM финансового риска.
+
+### Что нужно для награды
+
+`reward_amount` + `reward_currency` + `payment_method` + `payment_type`
+(`CRYPTO` / `FIAT` / `UNKNOWN`). Задачи вида «paid bounty» без суммы исключаются
+(`NO_CONFIRMED_REWARD`). Маленькие bounty ($1–25) не отбрасываются.
+
+### Результат: `bounty_results.json`
+
+```json
+{
+  "generated_at": "2026-09-15T07:09:44Z",
+  "sources": { "github": { "source_status": "OK", "discovered": 31, "verified_open": 6, "kept": 10, "reason": "", "diagnostics": {}, "errors": [] } },
+  "counts": { "all_verified": 11, "top_agent_compatible": 0, "top_human_only": 0, "secondary_candidates": 0, "needs_manual_check": 5, "excluded": 35 },
+  "all_verified": [ { "source": "...", "title": "...", "url": "...", "status": "OPEN", "bounty_status": "AVAILABLE", "reward_amount": 50, "reward_currency": "USD", "payment_method": "...", "payment_type": "FIAT", "financial_risk": "LOW", "region": "UNKNOWN", "difficulty": "MEDIUM", "estimated_time": "UNKNOWN", "tech_stack": [], "beginner_friendly": false, "agent_compatible": false, "exclusion_reason": "", "verified_at": "..." } ],
+  "top_agent_compatible": [],
+  "top_human_only": [],
+  "secondary_candidates": [],
+  "needs_manual_check": [],
+  "excluded": [ { "title": "...", "url": "...", "source": "...", "exclusion_reason": "CLOSED", "financial_risk": "LOW", "region": "UNKNOWN", "verified_status": "CLOSED" } ]
+}
+```
+
+* `all_verified` — задачи, открытость которых подтверждена первоисточником
+  (полный контракт полей из задания);
+* `top_agent_compatible` — прошли все жёсткие фильтры и посильны агенту;
+* `top_human_only` — открытые и оплачиваемые, но не для агентской подачи;
+* `secondary_candidates` — сложные (HARD), но потенциально стоящие задачи;
+* `needs_manual_check` — неизвестен финансовый риск / регион / стек;
+* `excluded` — всё остальное, с причиной (для аудита; задачи не удаляются).
+
+Пустой `top_agent_compatible` — нормальный результат: лучше пустой список, чем
+сомнительные задачи.
+
+### Ранжирование (порядок из задания)
+
+1. crypto-выплата → 2. отсутствие финансового риска → 3. подтверждённая
+открытость → 4. beginner-friendly → 5. маленькая/простая задача → 6. размер
+награды (log-шкала) → 7. global / Russia allowed. Балл и факторы
+(`rank_score`, `ranking_factors`) пишутся в отчёт.
+
+### Логи
+
+```
+[DISCOVERED] github: найдено 31, подтверждено открытыми 6
+[VERIFYING]  github: проверено по первоисточнику 10 записей (source_status=OK)
+[VERIFIED OPEN] https://github.com/.../issues/337
+[EXCLUDED][CLOSED] https://github.com/.../issues/12 — CLOSED
+[EXCLUDED][REGION] https://superteam.fun/earn/listing/... — REGION_RESTRICTED
+[EXCLUDED][FINANCIAL RISK] https://github.com/.../issues/99 — REAL_FINANCIAL_ACTIVITY_REQUIRED
+[EXCLUDED][CLAIMED] / [EXCLUDED][ASSIGNED] / [EXCLUDED][PR_LINKED] / [EXCLUDED][NO_REWARD]
+[RECOMMENDED] https://github.com/.../issues/337
+```
+
+### Ограничения (честно)
+
+* `warpSpeed Bounties` и `OpenBounty` по проверенным адресам сейчас не являются
+  рабочими bounty-платформами — источники возвращают `NOT_FOUND` с доказательствами;
+* регион в GitHub-issue указывается редко, поэтому при строгом режиме почти все
+  задачи попадают в `needs_manual_check`;
+* формулировки-отрицания в найденном анализаторе риска не всегда распознаются
+  («no spending of your own funds» может быть прочитано как требование своих
+  средств): выбран консервативный вариант — лучше исключить, чем включить;
+* без `GITHUB_TOKEN` GitHub API отдаёт 60 запросов/час, поэтому проверяется
+  меньше задач (`GITHUB_MAX_VERIFICATIONS`).
 
 ---
 
@@ -824,11 +1226,50 @@ python -m pytest -q
   `=== MANUAL ELIGIBILITY CHECK ===` и полный `=== VERIFIED OPEN ===`;
 * в `superteam_results.json` добавлены `top_agent_compatible` и `top_human_only`.
 
-Этап 5 (план, по желанию) — не реализовано:
+Этап 5 (реализован) — multi-source поиск оплачиваемых задач (см. раздел
+«MULTI-SOURCE ПОИСК ОПЛАЧИВАЕМЫХ ЗАДАЧ» выше):
+
+* независимые адаптеры источников `superteam` / `github` / `bountybureau` /
+  `opire` / `warpspeed` / `openbounty` (`python -m superteam_agent --all-sources`);
+* обязательная проверка ПЕРВОИСТОЧНИКА для каждой задачи (GitHub issue или
+  страница bounty): open/closed, assignee, связанные PR, claimed/paid, сумма награды;
+* дедупликация одной задачи из разных источников + приоритет источников;
+* жёсткий финансовый фильтр (в т.ч. `financial_risk = UNKNOWN` — ручная проверка),
+  региональный фильтр с `Russia excluded`, запрет «paid bounty» без суммы;
+* разделы `top_agent_compatible` / `top_human_only` / `needs_manual_check` /
+  `secondary_candidates` / `excluded` в `bounty_results.json`;
+* честные статусы источников `OK` / `EMPTY` / `PARTIAL` / `ERROR` / `NOT_FOUND`
+  (warpSpeed и OpenBounty по проверенным адресам не существуют как платформы).
+
+Этап 6 (реализован) — полноценная двухэтапная проверка (discovery → verification):
+
+* единая модель статусов: `VERIFIED_OPEN` / `VERIFIED_EXPIRED` / `VERIFIED_CLOSED` /
+  `VERIFIED_WINNER_ANNOUNCED` / `VERIFIED_HUMAN_ONLY` / `UNKNOWN` (старые имена — алиасы);
+* карточка «open» без найденного deadline больше не становится `VERIFIED_OPEN`;
+* human-only определяется по карточке (`agentAccess=HUMAN_ONLY`) → `VERIFIED_HUMAN_ONLY`;
+  отсутствие данных о agent access → `UNKNOWN` + `agent_access_unknown = true`;
+* debug/evidence-поля `verified_*` + `verification_url`/`verification_timestamp`/`evidence`;
+* список `verified_open_listings` (никаких `UNKNOWN`);
+* TTL-кэш проверки карточек (`SUPERTEAM_VERIFICATION_CACHE_TTL`);
+* разделы `=== VERIFIED OPEN ===`, `=== EXCLUDED ===`,
+  `=== UNKNOWN / VERIFICATION FAILED ===`, `=== STATISTICS ===`;
+* исключённая задача больше не может иметь приоритет выше `EXCLUDED`.
+
+Этап 7 (реализован) — пользовательское представление результатов:
+
+* основной результат — Excel-отчёт `superteam_report.xlsx` (openpyxl) с листами
+  `SUMMARY` / `AVAILABLE` / `EXCLUDED` / `UNKNOWN`; на `AVAILABLE` попадают только
+  задания, прошедшие ВСЕ существующие фильтры (источник — `is_verified_open_listing()`);
+* настоящие гиперссылки `Open card` → `card_url` (длинные URL в ячейках не выводятся);
+* нормализация причин в короткий человеческий текст (технические причины остаются в JSON);
+* компактная консоль (без URL и без списка исключённых), `--report` без обращения к сайту;
+* `superteam_report.md` стал компактным Markdown-summary, JSON и кэш не изменены.
+
+Этап 8 (план, по желанию) — не реализовано:
 
 * подготовка черновика submission (по-прежнему **запрещено**);
 * история прогонов и сравнение изменений между запусками;
-* уведомления о новых подходящих заданиях.
+* уведомления о новых подходящих заданиях (в т.ч. слежение за конкретным issue).
 
 Важно: скрипт ничего не изменяет на Superteam — только читает данные (Agent API),
 публичную ленту и страницы карточек. Submission и авто-подача заявок не реализованы.

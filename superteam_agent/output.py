@@ -37,6 +37,60 @@ from .risk import REAL_ACTIVITY_EXCLUSION
 from .secrets import redact, safe
 
 
+def print_excluded_section(entries: Sequence[Mapping[str, Any]]) -> None:
+    """Секция ``=== EXCLUDED ===``: Title / Status / Reason (см. п.20 задания)."""
+    print("=== EXCLUDED ===")
+    print()
+    print(len(entries))
+    print()
+    for position, entry in enumerate(entries, start=1):
+        print(f"[{position}] {safe(entry.get('title') or '(no title)')}")
+        print(f"    Status: {entry.get('verification_status')}")
+        print(f"    Reason: {safe(entry.get('exclusion_reason') or '-')}")
+        print(f"    URL:    {safe(entry.get('card_url') or '')}")
+        print()
+
+
+def print_unknown_section(entries: Sequence[Mapping[str, Any]]) -> None:
+    """Секция ``=== UNKNOWN / VERIFICATION FAILED ===`` с причиной и evidence."""
+    print("=== UNKNOWN / VERIFICATION FAILED ===")
+    print()
+    print(len(entries))
+    print()
+    for position, entry in enumerate(entries, start=1):
+        print(f"[{position}] {safe(entry.get('title') or '(no title)')}")
+        print(f"    Reason: {safe(entry.get('error') or entry.get('exclusion_reason') or 'status cannot be determined')}")
+        print(f"    URL:    {safe(entry.get('card_url') or '')}")
+        for line in list(entry.get("evidence") or [])[:2]:
+            print(f"    evidence: {safe(line)}")
+        print()
+
+
+#: Подписи для секции статистики (порядок как в задании).
+STATISTICS_LABELS: tuple[tuple[str, str], ...] = (
+    ("discovered", "Discovered"),
+    ("unique", "Unique"),
+    ("pre_filtered", "Pre-filtered"),
+    ("verified", "Verified"),
+    ("verified_open", "Verified Open"),
+    ("expired", "Expired"),
+    ("closed", "Closed"),
+    ("human_only", "Human Only"),
+    ("winner_announced", "Winner Announced"),
+    ("unknown", "Unknown"),
+    ("risk_excluded", "Risk Excluded"),
+)
+
+
+def print_statistics(statistics: Mapping[str, Any]) -> None:
+    """Секция ``=== STATISTICS ===`` из counters прогона."""
+    print("=== STATISTICS ===")
+    print()
+    for key, label in STATISTICS_LABELS:
+        print(f"    {label}: {statistics.get(key, 0)}")
+    print()
+
+
 def source_label(entry: Mapping[str, Any]) -> str:
     """Человеко-читаемая метка источников: agent_api, website или оба."""
     api = bool(entry.get("source_api"))
@@ -332,6 +386,8 @@ def save_hybrid_results(
     website_source: Mapping[str, Any],
     top_agent_compatible: Sequence[Mapping[str, Any]] | None = None,
     top_human_only: Sequence[Mapping[str, Any]] | None = None,
+    verified_open_listings: Sequence[Mapping[str, Any]] | None = None,
+    statistics: Mapping[str, Any] | None = None,
 ) -> Path:
     """Сохранить результаты гибридного поиска в ``superteam_results.json``.
 
@@ -370,13 +426,16 @@ def save_hybrid_results(
         "agent_api_count": agent_api_count,
         "website_count": website_count,
         "unique_count": unique_count,
-        "verified_open_count": sum(
-            1 for entry in entries if entry.get("final_decision") == "CANDIDATE"
-        ),
+        "discovered_count": agent_api_count + website_count,
+        "pre_filtered_count": len(entries),
+        # Только реально подтверждённые карточкой открытые и подходящие листинги.
+        "verified_open_count": len(verified_open_listings or []),
+        "statistics": dict(statistics or {}),
         "website_diagnostics": website_source.get("diagnostics", []),
         "website_feed": website_source.get("feed", {}),
         "top_agent_compatible": compact(top_agent_compatible or []),
         "top_human_only": compact(top_human_only or []),
+        "verified_open_listings": compact(verified_open_listings or []),
         "listings": list(entries),
     }
     text = redact(json.dumps(report, ensure_ascii=False, indent=2, default=str))
